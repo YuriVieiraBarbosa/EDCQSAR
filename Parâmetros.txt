@@ -1,0 +1,12 @@
+molecular_weight
+logP
+hydrogen_bond_acceptors
+hydrogen_bond_donors
+tpsa
+stereo_centers
+solubility
+hydration_free_energy
+lipophilicity
+PAINS
+BRENK
+NIH
