@@ -1,355 +1,266 @@
-import pandas as pd
+import warnings
+warnings.filterwarnings("ignore")
+
+from pathlib import Path
+
 import numpy as np
-import matplotlib.pyplot as plt
+import pandas as pd
 
 from rdkit import Chem
-from rdkit.Chem import rdFingerprintGenerator
+from rdkit.Chem import Descriptors, Lipinski, Crippen, rdMolDescriptors
 
-from sklearn.model_selection import (
-    train_test_split,
-    KFold,
-    cross_val_score
-)
-
-from sklearn.ensemble import RandomForestRegressor
-
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_validate
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
-    r2_score,
-    mean_absolute_error,
-    mean_squared_error
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    confusion_matrix,
+    classification_report
 )
 
-# =====================================================
+# ======================
 # CONFIG
-# =====================================================
+# ======================
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "dados"
+OUT_DIR = BASE_DIR / "resultados"
+OUT_DIR.mkdir(exist_ok=True)
 
-FILE = "/home/curso/Desktop/yurivib/ERa_clear.csv"
+ARQUIVO = DATA_DIR / "ERa_admet_preds.csv"
+TARGET_COL = "pChEMBL Value"
+SMILES_COL = "Smiles"
+THRESHOLD_PCHEMBL = 7.0  # ativo se pChEMBL >= 7.0
+RANDOM_STATE = 42
+TEST_SIZE = 0.20
 
-TARGET = "pChEMBL Value"
-SMILES = "Smiles"
+# ======================
+# LOAD
+# ======================
+if not ARQUIVO.exists():
+    raise FileNotFoundError(
+        f"Arquivo não encontrado: {ARQUIVO}\n"
+        f"Coloque o CSV em: {DATA_DIR}"
+    )
 
-N_BITS = 2048
-RADIUS = 2
+df = pd.read_csv(ARQUIVO)
+print("Shape original:", df.shape)
 
-# =====================================================
-# DATASET
-# =====================================================
+if TARGET_COL not in df.columns:
+    raise ValueError(f"Coluna alvo '{TARGET_COL}' não encontrada.")
+if SMILES_COL not in df.columns:
+    raise ValueError(f"Coluna SMILES '{SMILES_COL}' não encontrada.")
 
-df = pd.read_csv(FILE)
+# limpeza básica
+df = df.copy()
+df = df[df[TARGET_COL].notna()].copy()
+df[TARGET_COL] = pd.to_numeric(df[TARGET_COL], errors="coerce")
+df = df[df[TARGET_COL].notna()].copy()
+df = df[df[SMILES_COL].notna()].copy()
 
-print("\n===================================")
-print("DATASET")
-print("===================================")
+print("Shape após limpeza:", df.shape)
 
-print("Moléculas:", len(df))
+# ======================
+# CRIAR CLASSE BINÁRIA
+# 1 = ativo / liga
+# 0 = inativo / não liga
+# ======================
+df["classe"] = (df[TARGET_COL] >= THRESHOLD_PCHEMBL).astype(int)
 
-# =====================================================
-# VALIDAR SMILES
-# =====================================================
+n_total = len(df)
+n_ativos = int(df["classe"].sum())
+n_inativos = n_total - n_ativos
 
-valid_rows = []
+print(f"\nThreshold pChEMBL: {THRESHOLD_PCHEMBL}")
+print(f"Ativos (1): {n_ativos} ({100*n_ativos/n_total:.1f}%)")
+print(f"Inativos (0): {n_inativos} ({100*n_inativos/n_total:.1f}%)")
 
-for idx, smi in enumerate(df[SMILES]):
+# ======================
+# SMILES -> molécula RDKit
+# ======================
+df["mol"] = df[SMILES_COL].apply(lambda x: Chem.MolFromSmiles(str(x)))
+df = df[df["mol"].notna()].copy().reset_index(drop=True)
 
-    mol = Chem.MolFromSmiles(str(smi))
+print("Shape após remover SMILES inválidos:", df.shape)
 
-    if mol is not None:
-        valid_rows.append(idx)
+# ======================
+# DESCRITORES RDKit
+# ======================
+def calc_rdkit_descriptors(mol):
+    try:
+        return {
+            "MolWt": Descriptors.MolWt(mol),
+            "ExactMolWt": Descriptors.ExactMolWt(mol),
+            "MolLogP": Crippen.MolLogP(mol),
+            "MolMR": Crippen.MolMR(mol),
+            "TPSA": rdMolDescriptors.CalcTPSA(mol),
+            "FractionCSP3": rdMolDescriptors.CalcFractionCSP3(mol),
+            "NumHAcceptors": Lipinski.NumHAcceptors(mol),
+            "NumHDonors": Lipinski.NumHDonors(mol),
+            "NumRotatableBonds": Lipinski.NumRotatableBonds(mol),
+            "RingCount": Lipinski.RingCount(mol),
+            "NumAromaticRings": rdMolDescriptors.CalcNumAromaticRings(mol),
+            "NumAliphaticRings": rdMolDescriptors.CalcNumAliphaticRings(mol),
+            "HeavyAtomCount": Lipinski.HeavyAtomCount(mol),
+            "NumHeteroatoms": Lipinski.NumHeteroatoms(mol),
+            "NHOHCount": Lipinski.NHOHCount(mol),
+            "NOCount": Lipinski.NOCount(mol),
+            "LabuteASA": rdMolDescriptors.CalcLabuteASA(mol),
+            "BalabanJ": Descriptors.BalabanJ(mol),
+            "BertzCT": Descriptors.BertzCT(mol),
+            "Chi0": Descriptors.Chi0(mol),
+            "Chi1": Descriptors.Chi1(mol),
+            "Chi2n": Descriptors.Chi2n(mol),
+            "Chi3n": Descriptors.Chi3n(mol),
+            "Chi4n": Descriptors.Chi4n(mol),
+            "HallKierAlpha": Descriptors.HallKierAlpha(mol),
+            "Kappa1": Descriptors.Kappa1(mol),
+            "Kappa2": Descriptors.Kappa2(mol),
+            "Kappa3": Descriptors.Kappa3(mol),
+            "MaxPartialCharge": Descriptors.MaxPartialCharge(mol),
+            "MinPartialCharge": Descriptors.MinPartialCharge(mol),
+            "MaxAbsPartialCharge": Descriptors.MaxAbsPartialCharge(mol),
+            "MinAbsPartialCharge": Descriptors.MinAbsPartialCharge(mol),
+            "NumValenceElectrons": Descriptors.NumValenceElectrons(mol),
+        }
+    except Exception:
+        return None
 
-df = df.iloc[valid_rows].reset_index(drop=True)
+desc_series = df["mol"].apply(calc_rdkit_descriptors)
+desc_df = pd.DataFrame(desc_series.tolist())
 
-print("Moléculas válidas:", len(df))
+valid_mask = desc_df.notna().all(axis=1)
+df = df.loc[valid_mask].copy().reset_index(drop=True)
+desc_df = desc_df.loc[valid_mask].copy().reset_index(drop=True)
 
-# =====================================================
-# MORGAN FINGERPRINTS
-# =====================================================
+print("Shape dos descritores:", desc_df.shape)
 
-print("\n===================================")
-print("GERANDO ECFP4")
-print("===================================")
+# ======================
+# MATRIZ X / y
+# ======================
+X = desc_df.copy()
+y = df["classe"].copy()
 
-generator = rdFingerprintGenerator.GetMorganGenerator(
-    radius=RADIUS,
-    fpSize=N_BITS
-)
-
-fps = []
-
-for smi in df[SMILES]:
-
-    mol = Chem.MolFromSmiles(smi)
-
-    fp = generator.GetFingerprint(mol)
-
-    fps.append(np.array(fp))
-
-X_fp = np.vstack(fps)
-
-print("Fingerprint matrix:", X_fp.shape)
-
-# =====================================================
-# DESCRITORES
-# =====================================================
-
-descriptor_cols = [
-
-    "molecular_weight",
-    "logP",
-    "hydrogen_bond_acceptors",
-    "hydrogen_bond_donors",
-    "stereo_centers",
-    "tpsa",
-    "HydrationFreeEnergy_FreeSolv",
-    "Solubility_AqSolDB"
-
-]
-
-X_desc = df[descriptor_cols].values
-
-print("Descritores:", X_desc.shape)
-
-# =====================================================
-# CONCATENA
-# =====================================================
-
-X = np.hstack([X_fp, X_desc])
-
-y = df[TARGET].values
-
-print("X final:", X.shape)
-
-# =====================================================
-# SPLIT
-# =====================================================
-
+# ======================
+# SPLIT ESTRATIFICADO
+# ======================
 X_train, X_test, y_train, y_test = train_test_split(
     X,
     y,
-    test_size=0.20,
-    random_state=42
+    test_size=TEST_SIZE,
+    random_state=RANDOM_STATE,
+    stratify=y
 )
 
-print("\n===================================")
-print("RANDOM SPLIT")
-print("===================================")
+print(f"\nTrain: {X_train.shape[0]} moléculas")
+print(f"Test : {X_test.shape[0]} moléculas")
 
-print("Treino:", len(X_train))
-print("Teste :", len(X_test))
+# ======================
+# PIPELINE RF
+# ======================
+pipe = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("model", RandomForestClassifier(
+        n_estimators=500,
+        max_depth=15,
+        min_samples_split=5,
+        min_samples_leaf=2,
+        class_weight="balanced",
+        random_state=RANDOM_STATE,
+        n_jobs=-1
+    ))
+])
 
-# =====================================================
-# RANDOM FOREST
-# =====================================================
+# ======================
+# CROSS-VALIDATION
+# ======================
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
 
-model = RandomForestRegressor(
+scoring = {
+    "accuracy": "accuracy",
+    "precision": "precision",
+    "recall": "recall",
+    "f1": "f1",
+    "roc_auc": "roc_auc"
+}
 
-    n_estimators=500,
-    max_features="sqrt",
-    min_samples_leaf=2,
-    min_samples_split=5,
-    random_state=42,
-    n_jobs=-1
-
-)
-
-print("\nTreinando Random Forest...")
-
-model.fit(
-    X_train,
-    y_train
-)
-
-# =====================================================
-# TESTE
-# =====================================================
-
-pred = model.predict(X_test)
-
-r2 = r2_score(y_test, pred)
-
-mae = mean_absolute_error(
-    y_test,
-    pred
-)
-
-rmse = np.sqrt(
-    mean_squared_error(
-        y_test,
-        pred
-    )
-)
-
-print("\n===================================")
-print("TESTE EXTERNO")
-print("===================================")
-
-print(f"R²   = {r2:.4f}")
-print(f"MAE  = {mae:.4f}")
-print(f"RMSE = {rmse:.4f}")
-
-# =====================================================
-# CROSS VALIDATION
-# =====================================================
-
-cv = KFold(
-    n_splits=5,
-    shuffle=True,
-    random_state=42
-)
-
-scores = cross_val_score(
-    model,
+cv_results = cross_validate(
+    pipe,
     X,
     y,
     cv=cv,
-    scoring="r2",
+    scoring=scoring,
     n_jobs=-1
 )
 
-print("\n===================================")
-print("5-FOLD CV")
-print("===================================")
+print("\n===== CROSS-VALIDATION (5 folds) =====")
+print(f"Accuracy : {cv_results['test_accuracy'].mean():.4f} ± {cv_results['test_accuracy'].std():.4f}")
+print(f"Precision: {cv_results['test_precision'].mean():.4f} ± {cv_results['test_precision'].std():.4f}")
+print(f"Recall   : {cv_results['test_recall'].mean():.4f} ± {cv_results['test_recall'].std():.4f}")
+print(f"F1       : {cv_results['test_f1'].mean():.4f} ± {cv_results['test_f1'].std():.4f}")
+print(f"ROC-AUC  : {cv_results['test_roc_auc'].mean():.4f} ± {cv_results['test_roc_auc'].std():.4f}")
 
-print(f"R² médio = {scores.mean():.4f}")
-print(f"R² std   = {scores.std():.4f}")
+# ======================
+# TREINO FINAL
+# ======================
+pipe.fit(X_train, y_train)
 
-# =====================================================
-# IMPORTÂNCIA DAS FEATURES
-# =====================================================
+# ======================
+# TESTE
+# ======================
+y_pred = pipe.predict(X_test)
+y_proba = pipe.predict_proba(X_test)[:, 1]
 
-feature_names = (
-    [f"Bit_{i}" for i in range(N_BITS)]
-    + descriptor_cols
-)
+acc = accuracy_score(y_test, y_pred)
+prec = precision_score(y_test, y_pred, zero_division=0)
+rec = recall_score(y_test, y_pred, zero_division=0)
+f1 = f1_score(y_test, y_pred, zero_division=0)
+auc = roc_auc_score(y_test, y_proba)
 
-importance = pd.DataFrame({
+print("\n===== RESULTADOS NO TESTE =====")
+print(f"Accuracy : {acc:.4f}")
+print(f"Precision: {prec:.4f}")
+print(f"Recall   : {rec:.4f}")
+print(f"F1       : {f1:.4f}")
+print(f"ROC-AUC  : {auc:.4f}")
 
-    "Feature": feature_names,
-    "Importance": model.feature_importances_
+print("\n===== MATRIZ DE CONFUSÃO =====")
+cm = confusion_matrix(y_test, y_pred)
+print(cm)
 
-})
+print("\n===== CLASSIFICATION REPORT =====")
+print(classification_report(y_test, y_pred, digits=4, zero_division=0))
 
-importance = importance.sort_values(
-    by="Importance",
-    ascending=False
-)
+# ======================
+# FEATURE IMPORTANCE
+# ======================
+rf_model = pipe.named_steps["model"]
+fi = pd.DataFrame({
+    "feature": X.columns,
+    "importance": rf_model.feature_importances_
+}).sort_values("importance", ascending=False)
 
-print("\n===================================")
-print("TOP 30 FEATURES")
-print("===================================")
+print("\n===== TOP 20 DESCRITORES =====")
+print(fi.head(20).to_string(index=False))
 
-print(
-    importance.head(30).to_string(index=False)
-)
+arquivo_fi = OUT_DIR / "rf_classification_feature_importance.csv"
+fi.to_csv(arquivo_fi, index=False)
 
-importance.to_csv(
-    "RF_hybrid_importance.csv",
-    index=False
-)
+# ======================
+# SALVAR PREDIÇÕES
+# ======================
+preds = df.loc[X_test.index, [SMILES_COL, TARGET_COL]].copy()
+preds["classe_real"] = y_test.values
+preds["classe_predita"] = y_pred
+preds["prob_ativo"] = y_proba
 
-# =====================================================
-# REAL VS PREDITO
-# =====================================================
+arquivo_preds = OUT_DIR / "rf_classification_predictions.csv"
+preds.to_csv(arquivo_preds, index=False)
 
-plt.figure(figsize=(7,7))
-
-plt.scatter(
-    y_test,
-    pred,
-    alpha=0.6
-)
-
-mn = min(y_test.min(), pred.min())
-mx = max(y_test.max(), pred.max())
-
-plt.plot(
-    [mn, mx],
-    [mn, mx],
-    "--"
-)
-
-plt.xlabel("pChEMBL Experimental")
-plt.ylabel("pChEMBL Predito")
-
-plt.title(
-    f"RF Híbrido (R²={r2:.3f})"
-)
-
-plt.tight_layout()
-
-plt.savefig(
-    "RF_hybrid_real_vs_predito.png",
-    dpi=300
-)
-
-plt.close()
-
-# =====================================================
-# HISTOGRAMA DOS ERROS
-# =====================================================
-
-errors = pred - y_test
-
-plt.figure(figsize=(7,5))
-
-plt.hist(
-    errors,
-    bins=40
-)
-
-plt.xlabel("Erro")
-plt.ylabel("Frequência")
-
-plt.title(
-    "Distribuição dos erros"
-)
-
-plt.tight_layout()
-
-plt.savefig(
-    "RF_hybrid_histograma_erros.png",
-    dpi=300
-)
-
-plt.close()
-
-# =====================================================
-# RESÍDUOS
-# =====================================================
-
-plt.figure(figsize=(7,5))
-
-plt.scatter(
-    y_test,
-    errors,
-    alpha=0.6
-)
-
-plt.axhline(
-    0,
-    linestyle="--"
-)
-
-plt.xlabel("pChEMBL Experimental")
-plt.ylabel("Erro")
-
-plt.title(
-    "Resíduos"
-)
-
-plt.tight_layout()
-
-plt.savefig(
-    "RF_hybrid_residuos.png",
-    dpi=300
-)
-
-plt.close()
-
-print("\n===================================")
-print("ARQUIVOS GERADOS")
-print("===================================")
-
-print("RF_hybrid_importance.csv")
-print("RF_hybrid_real_vs_predito.png")
-print("RF_hybrid_histograma_erros.png")
-print("RF_hybrid_residuos.png")
+print("\nArquivos salvos:")
+print(arquivo_fi)
+print(arquivo_preds)
