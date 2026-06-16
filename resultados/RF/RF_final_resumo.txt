@@ -1,0 +1,16 @@
+RANDOM FOREST FINAL
+===================
+
+Melhores hiperparâmetros do Optuna:
+bootstrap = False
+max_depth = 30
+max_features = sqrt
+min_samples_leaf = 1
+min_samples_split = 5
+n_estimators = 750
+
+R2 teste externo = 0.813221
+MAE = 0.497434
+RMSE = 0.662009
+R2 CV medio = 0.793239
+R2 CV std = 0.019171

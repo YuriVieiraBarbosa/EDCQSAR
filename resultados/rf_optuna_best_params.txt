@@ -1,0 +1,9 @@
+Best trial: 22
+Best R2 CV: 0.793289
+
+max_depth: 30
+n_estimators: 850
+min_samples_split: 5
+min_samples_leaf: 1
+max_features: sqrt
+bootstrap: False
