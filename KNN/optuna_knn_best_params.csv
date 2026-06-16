@@ -1,0 +1,2 @@
+n_neighbors,weights,metric,p,best_cv_r2,test_r2,test_mae,test_rmse
+9,distance,minkowski,1,0.4701289366479444,0.46990250607536554,0.841488593778174,1.1152649174833917

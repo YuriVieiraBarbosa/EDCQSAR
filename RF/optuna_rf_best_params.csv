@@ -1,0 +1,2 @@
+n_estimators,max_depth,min_samples_split,min_samples_leaf,max_features,bootstrap,best_cv_r2,test_r2,test_mae,test_rmse
+965,38,6,1,sqrt,False,0.7744157733635728,0.8151722104804855,0.4947659306640955,0.6585424881035535

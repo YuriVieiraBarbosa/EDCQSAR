@@ -1,0 +1,2 @@
+model,k_neighbors,weights,metric,p,test_r2,test_mae,test_rmse,cv_r2_mean,cv_r2_std
+KNNRegressor,5,distance,minkowski,2,0.003426617692071754,1.0945060656427361,1.5291666122490855,0.24461115884718138,0.19646890755091587
